@@ -7,6 +7,13 @@ minor versions can still change behaviour.
 
 ## [Unreleased]
 
+- An OpenAI-compatible brain (`brain.provider: openai`) talks to a free router (`LLM_BASE_URL`, default `http://127.0.0.1:3010/v1`). A 429 or 5xx is retried. Any other failure stops the job. There is no fallback to Claude, Codex, or a paid API.
+- Resend is a mail provider. Sends use an idempotency key, the postal footer, and an unsubscribe line. `SENDING_ENABLED` and `AUTO_REPLY_ENABLED` default to off, so drafts queue until both are on for an automatic answer.
+- STOP, unsubscribe, and bounce write a DNC row. That address is not emailed again.
+- Cadence `sa_one_and_day_3_7`: one email for a .za address or a South African location. Everyone else gets day 3 and day 7, then the sequence stops. The hard daily cap defaults to 75.
+- Free web discovery (`ddg`) searches the four audiences the map cannot list. DuckDuckGo is tried first, then Bing. A blocked search fails instead of inventing companies.
+- `scripts/sellbird-service.sh` and `deploy/sellbird.service` run the heartbeat and the inbound webhook.
+
 ## [0.5.0] - 2026-11-24
 
 **Your sales team, inside your agent.** Sellbird now lives where you already

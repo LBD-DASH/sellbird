@@ -55,7 +55,7 @@ def test_claude_is_the_default():
 def test_brain_config_validation():
     cfg = BrainConfig(provider=" Codex ", model="gpt-5.5", reasoning_effort="HIGH")
     assert (cfg.provider, cfg.model, cfg.reasoning_effort) == ("codex", "gpt-5.5", "high")
-    for bad in ({"provider": "openai"}, {"model": "--dangerously-skip-permissions"},
+    for bad in ({"provider": "gemini"}, {"model": "--dangerously-skip-permissions"},
                 {"model": "gpt 5; rm -rf /"}, {"reasoning_effort": "max"}):
         with pytest.raises(ValidationError):
             BrainConfig(**bad)
@@ -369,7 +369,7 @@ async def test_existing_usage_rows_become_claude(tmp_path):
     assert await sm.get_usage_today("codex") == 0
     summary = await sm.get_state_summary()
     assert summary["usage_today"] == 7
-    assert summary["usage_today_by_provider"] == {"claude": 7, "codex": 0}
+    assert summary["usage_today_by_provider"] == {"claude": 7, "codex": 0, "openai": 0}
     with pytest.raises(ValueError):
         await sm.record_usage_event(provider="gemini")
 

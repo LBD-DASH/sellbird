@@ -11,6 +11,7 @@ Native flow:
 """
 
 import asyncio
+import inspect
 import logging
 import random
 import re
@@ -18,6 +19,9 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from sellbird.brain import Brain
+from sellbird.cadence import cadence_name, send_ceiling, send_day, step_allowed
+from sellbird.copy_6hn import unexpected_prices
+from sellbird.runtime_flags import sending_enabled
 from sellbird.config import (
     SellbirdConfig, EnvConfig, cold_daily_cap, compliance_footer_lines, compliance_notice,
     compliance_of, live_do_not_contact, operator_timezone, send_window_of,
@@ -227,7 +231,7 @@ class Sender:
         if await self.state.get_setting(KILL_SWITCH_KEY):
             return False
         email = self.config.channels.email
-        if email.max_daily_sends - await self.state.count_outbox_sent_today() <= 0:
+        if send_ceiling(email) - await self.state.count_outbox_sent_today() <= 0:
             return False
         inboxes = await self._load_inboxes()
         if inboxes.several:
@@ -302,7 +306,7 @@ class Sender:
             return
 
         # Enforce daily send limit
-        max_sends = self.config.channels.email.max_daily_sends
+        max_sends = send_ceiling(self.config.channels.email)
         sends_today = await self._count_sends_today()
         remaining = max_sends - sends_today
         if remaining <= 0:
@@ -493,7 +497,7 @@ class Sender:
             return
 
         # Check remaining daily send budget
-        max_sends = self.config.channels.email.max_daily_sends
+        max_sends = send_ceiling(self.config.channels.email)
         sends_today = await self._count_sends_today()
         remaining = max_sends - sends_today
         if remaining <= 0:
@@ -677,6 +681,8 @@ class Sender:
                 continue
             if await self.state.is_suppressed(email):  # never staged
                 continue
+            if getattr(self.state, "is_dnc", None) and await self.state.is_dnc(email):
+                continue
             if (prospect.email_status or "guess") not in sendable_email:
                 skipped += 1
                 continue
@@ -688,13 +694,22 @@ class Sender:
             # With a send window, each email is planned for the recipient's
             # office hours; follow-ups keep their delay, then move into it.
             zone = await self._zone_or_default(prospect) if window is not None else ""
+            cadence = cadence_name(self.config.channels.email)
+            place = await self._cadence_place(prospect)
             cumulative_days = 0
             new_rows = 0
             for step in campaign.sequence:
                 if step.step > 1 and not getattr(self.config.channels.email, "follow_ups", True):
                     continue    # first email only; a reply is still answered
-                cumulative_days += max(0, step.delay_days)
-                send_at = now + timedelta(days=cumulative_days)
+                allowed, _why = step_allowed(step.step, email, place, cadence=cadence)
+                if not allowed:
+                    continue
+                day = send_day(step.step, cadence)
+                if day is None:
+                    cumulative_days += max(0, step.delay_days)
+                    send_at = now + timedelta(days=cumulative_days)
+                else:
+                    send_at = now + timedelta(days=day)
                 if window is not None:
                     send_at = next_send_time(send_at, zone, window)
                 item_id = await self.state.add_outbox_item(
@@ -753,10 +768,30 @@ class Sender:
         return body.rstrip() + "\n\n" + footer
 
     def _outgoing_body(self, item: dict) -> str:
-        """The exact body that goes out: cold email gets the footer, replies don't."""
-        if item["kind"] == "sequence":
+        """The exact body that goes out: cold email gets the footer, replies don't.
+
+        Resend puts the postal line and the unsubscribe line on every message.
+        """
+        if item["kind"] == "sequence" or getattr(
+                self.config.channels.email, "provider", "") == "resend":
             return self._with_footer(item["body"])
         return item["body"]
+
+    async def _cadence_place(self, prospect) -> str:
+        """Location and domain text used to spot a South African contact."""
+        if prospect is None:
+            return ""
+        bits = []
+        company_id = getattr(prospect, "company_id", "") or ""
+        if company_id:
+            try:
+                company = await self.state.get_company(company_id)
+            except Exception:
+                company = None
+            if company is not None:
+                bits.extend(x for x in (
+                    getattr(company, "location", ""), getattr(company, "domain", "")) if x)
+        return " ".join(bits)
 
     async def _follow_up_order(self, item: dict, prospect=None) -> str | tuple[str, str] | None:
         """For a follow-up: "wait" until the email before it went out and its
@@ -817,11 +852,23 @@ class Sender:
         await sync_sending_mode(self.config, self.state)   # "Turn off autopilot" counts at once
         if prospect is None:
             return "failed", "prospect missing"
+        is_dnc = getattr(self.state, "is_dnc", None)
+        if is_dnc is not None:
+            dnc_reason = await is_dnc(item["to_email"])
+            if dnc_reason:
+                return "cancelled", f"dnc ({dnc_reason})"
         # A suppressed address or domain is never emailed, whatever the kind.
         suppressed = await self.state.is_suppressed(item["to_email"])
         if suppressed:
             return "cancelled", f"suppressed ({suppressed})"
         if item["kind"] == "sequence":
+            cadence = cadence_name(self.config.channels.email)
+            if cadence:
+                allowed, why = step_allowed(
+                    item["step"], item["to_email"], await self._cadence_place(prospect),
+                    cadence=cadence)
+                if not allowed:
+                    return "cancelled", why
             # Stop-on-reply / opt-out: never continue a sequence after contact.
             if prospect.status in STOP_STATUSES:
                 return "cancelled", f"prospect status '{prospect.status}'"
@@ -841,6 +888,11 @@ class Sender:
         # phrases): a draft that breaks them waits for an edit instead of
         # going out. Length and shape were checked when it was written, so an
         # edit you made on purpose isn't second-guessed here.
+        prices = list(getattr(getattr(self.config, "writer", None), "allowed_prices", None) or [])
+        bad_prices = unexpected_prices(f"{item.get('subject', '')}\n{item.get('body', '')}", prices)
+        if bad_prices:
+            logger.warning(f"Sender: holding email to {item['to_email']}: price {bad_prices}")
+            return "pending_review", ("held: price not in the offer list: " + ", ".join(bad_prices))[:300]
         style = style_problems(item["subject"], item["body"],
                                kind="reply" if item["kind"] == "reply" else "cold",
                                names=_names(prospect), shape=False)
@@ -884,6 +936,9 @@ class Sender:
 
     async def _drain_due(self):
         """Send due, approved outbox items through the provider."""
+        if not sending_enabled():
+            logger.info("Sender: SENDING_ENABLED is off. Drafts stay queued. Nothing was sent.")
+            return
         if self.precleared is None:
             # Check switched off: cold email no longer waits on it, so a
             # hold recorded while it was on must not stay on Today.
@@ -910,7 +965,7 @@ class Sender:
             await self.state.note_sends_held(f"{SIGNATURE_HOLD_PREFIX}{problem}")
             return
 
-        max_daily = self.config.channels.email.max_daily_sends
+        max_daily = send_ceiling(self.config.channels.email)
         sent_today = await self.state.count_outbox_sent_today()
         # Each inbox sends up to MAX_SENDS_PER_CYCLE a cycle; max_daily_sends
         # stays the ceiling on everything sent in a day.
@@ -921,7 +976,7 @@ class Sender:
             return
         # Cold email has its own cap under the warmup ramp; replies don't.
         # Counted from local midnight, the day the ramp counts in.
-        cold_cap = cold_daily_cap(self.config.channels.email)
+        cold_cap = min(cold_daily_cap(self.config.channels.email), max_daily)
         midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
         cold_left = cold_cap - await self.state.count_outbox_sent_today(
             kind="sequence",
@@ -1174,6 +1229,8 @@ class Sender:
                                                     error=f"held: {NO_HEADERS_HOLD}")
                 continue
             extra = {"headers": headers} if headers else {}
+            if "idempotency_key" in inspect.signature(provider.send_email).parameters:
+                extra["idempotency_key"] = f"sellbird-{item['id']}"
             try:
                 result = await provider.send_email(
                     item["to_email"], item["subject"], body,

@@ -15,6 +15,9 @@ import unicodedata
 from datetime import datetime, timezone
 
 from sellbird.booking import booking_instruction, said_they_booked
+from sellbird.copy_6hn import locked_reply
+from sellbird.replies import classify_reply
+from sellbird.runtime_flags import auto_reply_enabled, sending_enabled
 from sellbird.brain import Brain, BrainUnavailable
 from sellbird.config import (
     DEFAULT_OPT_OUT_LINE, PREVIOUS_DEFAULT_OPT_OUT_LINE, SellbirdConfig, EnvConfig, compliance_of, legacy_sending_held,
@@ -646,6 +649,9 @@ class Handler:
         self.env = env
         self.instantly = InstantlyClient(env.instantly_api_key)
         self.provider = get_mail_provider(config, env)
+        bind = getattr(self.provider, "bind_state", None)
+        if bind:
+            bind(state)
         # For extra inboxes' sign-ins (sellbird.mailboxes); None = the keychain.
         self.secrets = None
         self._inbox_providers: dict = {}   # extra inboxes' providers, kept across cycles
@@ -765,12 +771,12 @@ class Handler:
         ])
 
     async def _suppress(self, email: str, reason: str, source: str) -> None:
-        """Suppress an address; a bad address or a database hiccup never stops
-        the opt-out or bounce handling around it (the status already changed)."""
+        """Add an address to the DNC table. A bad address never stops the opt-out."""
+        dnc_reason = {"bounced": "bounce", "stop": "stop"}.get(reason, "unsubscribe")
         try:
-            await self.state.add_suppression("address", email or "", reason, source)
+            await self.state.add_dnc(email or "", dnc_reason, source)
         except Exception as e:
-            logger.warning(f"Handler: could not suppress {email!r}: {e}")
+            logger.warning(f"Handler: could not add {email!r} to the DNC table: {e}")
 
     async def _stop_colleagues(self, prospect):
         """A reply from anyone at a company stops the cold sequence to
@@ -886,13 +892,37 @@ class Handler:
         # the LLM — opt-outs and legal threats must never be missed. An
         # opt-out that also threatens is both: honoured, and handed to you.
         opt_out = _opt_out_reason(their_text, reply_text)
+        # STOP, unsubscribe, and bounce are decided in code so a model miss
+        # cannot keep the address on the list. Every other class still asks
+        # the model, and the rules are used when it does not answer.
+        ruled = classify_reply(their_text or reply_text, from_email=lead_email)
         if opt_out:
             intent = "unsubscribe"
+        elif ruled.kind == "bounce":
+            intent = "bounce"
+        elif ruled.kind in ("stop", "unsubscribe"):
+            intent = "unsubscribe"
+            opt_out = opt_out or {"rule": "phrase", "matched": ruled.kind, "why": ruled.why}
         elif escalate:
             intent = "escalate"
         else:
             intent = await self._classify_intent(reply_text, prospect)
+            if intent not in INTENT_LABELS:
+                intent = {
+                    "out_of_office": "ooo",
+                    "not_now": "not_interested",
+                    "interested": "interested",
+                    "question": "question",
+                }.get(ruled.kind, intent)
         logger.info(f"Handler: Intent for {lead_email}: {intent}")
+        if intent == "bounce":
+            await self._suppress(lead_email, "bounced", "bounce")
+            try:
+                await self.state.update_prospect_email(prospect.id, prospect.email, "invalid")
+            except Exception as e:
+                logger.warning(f"Handler: could not mark {lead_email} invalid: {e}")
+            logger.warning(f"Handler: bounce from {lead_email}. Added to the DNC table.")
+            return
         if intent not in NO_COMPANY_STOP_INTENTS:
             await self._stop_colleagues(prospect)
 
@@ -941,8 +971,8 @@ class Handler:
             handoff = await self._hand_off_once(prospect, reply_text)
         response = ""
         if intent in AUTO_REPLY_INTENTS and not held and not listed and not handed_off:
-            response = await self._generate_response(intent, reply_text, prospect, convo,
-                                                     handoff=handoff)
+            response = locked_reply(self.config, intent) or await self._generate_response(
+                intent, reply_text, prospect, convo, handoff=handoff)
 
         # 2c. Store the conversation in one write.
         if stored is None:
@@ -987,7 +1017,8 @@ class Handler:
                 stage="closed_lost")
             await self.state.update_prospect_status(prospect.id, "opted_out")
             # Suppressed by address too, so a re-import or another campaign can't reach them.
-            await self._suppress(lead_email, "opted_out", "reply")
+            matched = str((opt_out or {}).get("matched") or "").strip().lower()
+            await self._suppress(lead_email, "stop" if matched == "stop" else "opted_out", "reply")
             await self.state.log_action(
                 action_type="opt_out",
                 agent="handler",
@@ -1384,6 +1415,9 @@ class Handler:
         require_approval = getattr(
             self.config.channels.email, "require_approval", True
         )
+        # An answer is sent only when both flags are on. Otherwise it waits.
+        if not (sending_enabled() and auto_reply_enabled()):
+            require_approval = True
         # The first reply since you undid their opt-out waits for you, even
         # on autopilot: the undo panel promises it.
         review_key = REVIEW_NEXT_REPLY_KEY + prospect.id

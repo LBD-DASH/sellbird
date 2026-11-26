@@ -248,6 +248,7 @@ def cmd_status(args):
         by_provider = summary.get("usage_today_by_provider", {})
         print(f"  Claude calls today:   {by_provider.get('claude', summary['usage_today'])}")
         print(f"  Codex calls today:    {by_provider.get('codex', 0)}")
+        print(f"  Free router calls today: {by_provider.get('openai', 0)}")
         from sellbird.config import compliance_notice, load_config, sending_notice
         loaded = None
         try:
@@ -613,6 +614,18 @@ def cmd_profile(args):
     asyncio.run(_profile())
 
 
+def cmd_inbound(_args):
+    """Serve the Resend inbound webhook. Signature is checked before anything is stored."""
+    import os
+    import uvicorn
+    from sellbird.inbound_http import create_app
+
+    host = (os.getenv("INBOUND_BIND") or "127.0.0.1").strip() or "127.0.0.1"
+    port = int((os.getenv("INBOUND_PORT") or "8787").strip() or "8787")
+    print(f"\n  Resend inbound webhook on http://{host}:{port}/resend/inbound\n")
+    uvicorn.run(create_app(), host=host, port=port, log_level="info")
+
+
 def cmd_discover(args):
     """Find businesses. The only stage that spends money, so it estimates first."""
     from sellbird.state import StateManager
@@ -638,6 +651,14 @@ def cmd_discover(args):
                     print(f"    Note: {m['caveat']}")
             print("\n  Run one with: sellbird discover --provider <key> --estimate\n")
             return
+
+        if not getattr(args, "provider", ""):
+            try:
+                configured = load_config()
+            except Exception:
+                configured = None
+            chosen = str(getattr(getattr(configured, "discovery", None), "provider", "") or "")
+            args.provider = chosen or "osm"
 
         if args.provider not in PROVIDERS:
             print(f"\n  Unknown provider {args.provider!r}. "
@@ -1358,7 +1379,7 @@ def main():
         help="Max pages to crawl (default: 100)",
     )
     sub.add_argument(
-        "--provider", choices=["claude", "codex"], default=None,
+        "--provider", choices=["claude", "codex", "openai"], default=None,
         help="Subscription to think with (default: the one in your config, else claude)",
     )
     sub.add_argument("--model", default=None, help="Model for this provider (default: provider default)")
@@ -1429,8 +1450,8 @@ def main():
 
     # sellbird sending pause|resume|status
     sub = subparsers.add_parser("discover", help="Find businesses matching your ICP")
-    sub.add_argument("--provider", default="osm",
-                     help="Discovery provider (default: osm — free, no account)")
+    sub.add_argument("--provider", default="",
+                     help="Discovery provider (default: discovery.provider, else osm)")
     sub.add_argument("--providers", action="store_true",
                      help="List every provider with cost and setup, then exit")
     sub.add_argument("--estimate", action="store_true",
@@ -1456,6 +1477,10 @@ def main():
     sub.add_argument("--no-profile", action="store_true",
                      help="Don't profile what was found (profiling is free)")
     sub.set_defaults(func=cmd_discover)
+
+    sub = subparsers.add_parser(
+        "inbound", help="Serve the Resend inbound webhook (signature checked)")
+    sub.set_defaults(func=cmd_inbound)
 
     sub = subparsers.add_parser(
         "profile", help="Read discovered companies' websites (free, no Claude)")

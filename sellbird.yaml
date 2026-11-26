@@ -1,44 +1,56 @@
 persona:
-  name: "Alex"
-  company: "Your Company"
-  role: "Business Development"
-  email: "alex@yourcompany.com"
-  linkedin: "linkedin.com/in/alex-yourcompany"
-  tone: "professional, consultative, confident"
+  name: "6 Human Needs"
+  company: "6 Human Needs"
+  role: "Guide"
+  email: "hello@6humanneeds.online"
+  linkedin: ""
+  tone: "plain, specific, brief"
 
 product:
-  name: "Your Product"
-  description: "Describe what your product does and who it's for"
-  pricing: "Starting at $X/mo"
+  name: "6 Human Needs"
+  description: "A free 10-minute assessment, a $29 Personal report, a $59 Relationship report, and a $149 Personal Report plus 1 hour of coaching."
+  pricing: "Free 10-minute assessment. $29 Personal report. $59 Relationship report. $149 Personal Report plus 1 hour of coaching."
   key_benefits:
-    - "Benefit 1"
-    - "Benefit 2"
-    - "Benefit 3"
+    - "A free 10-minute assessment"
+    - "A $29 Personal report"
+    - "A $59 Relationship report"
+    - "A $149 Personal Report plus 1 hour of coaching"
   objection_responses:
-    "too expensive": "I understand budget is important. Most of our clients see ROI within 30 days..."
-    "already have a solution": "That makes sense. Curious — what's the one thing you wish it did better?"
-    "not interested": "No worries at all. Mind if I ask what your current approach looks like?"
+    "too expensive": "The free 10-minute assessment costs nothing. The reports are $29 for the Personal report and $59 for the Relationship report."
+    "already have a solution": "The free 10-minute assessment is a place to start, alongside the $29 Personal report or the $59 Relationship report."
+    "not interested": "Understood. The free 10-minute assessment stays available if you want it later."
   offer:
-    primary: ""                    # Main offer (e.g., "Monthly subscription starting at $99/mo")
-    entry: ""                      # Low-commitment entry (e.g., "14-day free trial", "Free audit")
-    goal: "book_call"              # Goal of outreach: book_call, start_trial, get_reply
-    booking_method: "calendar_link" # calendar_link, suggest_times, ask_preference
-    booking_url: ""                # Calendar link URL (if using calendar_link method)
-    meeting_duration: "15 minutes" # How long the call is
-    meeting_owner: ""              # Who takes the meeting (name or role)
+    primary: "$149 Personal Report plus 1 hour of coaching"
+    entry: "a free 10-minute assessment"
+    goal: "get_reply"
+    booking_method: "ask_preference"
+    booking_url: ""
+    meeting_duration: "1 hour"
+    meeting_owner: "6 Human Needs"
 
 icp:
+  # Four audiences. The concrete searches are the variants below. Coaches are
+  # looked up outside South Africa. A .za address still gets one email only.
   industries:
-    - "SaaS"
-    - "Marketing Agency"
-  company_size: "10-200 employees"
+    - "individuals and couples"
+    - "team leaders"
+    - "hr"
+    - "coaches outside South Africa"
+  company_size: ""
   titles:
-    - "VP Marketing"
-    - "Head of Growth"
-    - "CMO"
-    - "Director of Marketing"
+    - "Coach"
+    - "Therapist"
+    - "HR consultant"
+    - "Team leader"
   geography:
-    - "United States"
+    - "London"
+    - "New York"
+    - "Toronto"
+  keyword_variants:
+    "individuals and couples": ["relationship counsellor"]
+    "team leaders": ["team development consultant"]
+    "hr": ["human resources advisor"]
+    "coaches outside South Africa": ["executive coach"]
   # Roles that signal a company is in-market RIGHT NOW (a company hiring a
   # "Head of Growth" is shopping for growth tooling). Used for careers-page
   # scanning and job-board discovery. Empty = fall back to titles above.
@@ -47,8 +59,10 @@ icp:
 channels:
   email:
     enabled: true
-    provider: "gmail"          # gmail (recommended) | microsoft | smtp | instantly
-    max_daily_sends: 50
+    provider: "resend"         # resend | gmail | microsoft | smtp | instantly
+    max_daily_sends: 75
+    hard_daily_cap: 75         # sends stop at the lower of these two
+    cadence: "sa_one_and_day_3_7"
     require_approval: true      # native: review in Outbox; Instantly: sending held
     # link_domains: ["mainsite.com"]   # your own sites besides the sending
     #                                  # domain and booking link; on autopilot,
@@ -101,6 +115,18 @@ channels:
     max_daily_connections: 20
     max_daily_messages: 10
 
+# Free OpenAI-compatible router. LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, and
+# the optional X-Agent header (LLM_X_AGENT, default Sellbird) come from .env.
+# A failed call stops. It does not switch to Claude, Codex, or a paid API.
+brain:
+  provider: openai
+  model: ""
+
+# Free web search. OpenStreetMap has no category for these audiences, so a
+# map run comes back with nothing and looks like an empty market.
+discovery:
+  provider: ddg
+
 usage:
   max_daily_claude_percent: 80
   heartbeat_interval_minutes: 15
@@ -124,9 +150,9 @@ compliance:
   # Added under every cold email (never replies). US law (CAN-SPAM) requires a
   # postal address you receive mail at: a street address, PO box or virtual
   # mailbox. Until it's set, cold email still sends, with a warning.
-  postal_address: ""
+  postal_address: "PO Box 1673, Henley on Klip, Meyerton"
   # Any wording works: Sellbird reads every reply for a request to stop.
-  opt_out_line: "Not interested? Just let me know and I won't email you again."
+  opt_out_line: "To unsubscribe, reply STOP and I will not email you again."
   # Never email these, cold or in reply: competitors, your existing customers,
   # anyone under a legal hold. An entry is an address or a domain, and a domain
   # covers its subdomains ("acme.example" also blocks "mail.acme.example", but
@@ -152,9 +178,11 @@ compliance:
 # markdown file. When set they replace the built-in shape (email 1 under 75
 # words, an observation and a question, no pitch). The send gate still holds
 # every email to 220 words and one link. skills/email_rules.md is gitignored.
-# writer:
-#   email_rules: "skills/email_rules.md"
-#   sequence_length: 3   # emails per sequence; no upper limit. Follow-ups stop on a reply, a booking or an opt-out.
+writer:
+  email_rules: "skills/6hn_email.md"
+  sequence_length: 3
+  # A draft that names any other dollar amount waits. These are the only prices.
+  allowed_prices: [29, 59, 149]
 
 # Texts through your own Twilio account (keys go in .env). Off by default.
 # Only to people with a stored yes, never in quiet hours. See docs/texting.md.

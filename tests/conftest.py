@@ -14,6 +14,10 @@ import os
 # sellbird.paths resolves at import, so drop it before any sellbird import.
 # Tests that need it pass env= to resolve_home or use monkeypatch.
 os.environ.pop("SELLBIRD_HOME", None)
+# Production defaults are off. The suite turns them on so existing send tests
+# still exercise the outbox. A test that needs them off sets the variable itself.
+os.environ.setdefault("SENDING_ENABLED", "true")
+os.environ.setdefault("AUTO_REPLY_ENABLED", "true")
 
 import pytest  # noqa: E402
 

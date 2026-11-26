@@ -101,8 +101,10 @@ async def run_prospecting(
 
     report = PipelineReport()
 
+    chosen = provider or str(getattr(getattr(config, "discovery", None), "provider", "") or "") \
+        or DEFAULT_PROVIDER
     discovery = await run_discovery(
-        state, config, provider or DEFAULT_PROVIDER, queries,
+        state, config, chosen, queries,
         max_spend=max_spend, dry_run=dry_run,
     )
     report.discover = discovery.as_dict()

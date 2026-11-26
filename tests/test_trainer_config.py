@@ -116,19 +116,21 @@ def test_brain_selection_comes_from_the_trainer(tmp_path):
 
 
 def test_first_training_keeps_the_template_settings(tmp_path):
-    # No sellbird.local.yaml yet: the settings in sellbird.yaml (gmail, the
-    # Precleared block) carry over, and the untrained placeholder persona
-    # is replaced with what training learned.
+    # The template is already a real sending identity, so training refreshes
+    # the product and the company name and keeps the from address, Resend,
+    # and the Precleared block.
     template = tmp_path / "sellbird.yaml"
     shipped = (PROJECT_ROOT / "sellbird.yaml").read_text()
     template.write_text(shipped)
     path = tmp_path / "sellbird.local.yaml"
     out = write_trained_config(LEARNED, path)
 
-    assert out["channels"]["email"]["provider"] == "gmail"
+    assert out["channels"]["email"]["provider"] == "resend"
     assert out["compliance"]["precleared"]["enabled"] is False
-    assert out["persona"] == LEARNED["persona"]
-    assert out["product"]["offer"]["goal"] == "book_call"
+    assert out["persona"]["email"] == "hello@6humanneeds.online"
+    assert out["persona"]["company"] == "Acme Roofing"
+    assert out["product"]["name"] == "RoofBot"
+    assert out["product"]["offer"]["goal"] == "get_reply"
     assert template.read_text() == shipped  # the template itself is untouched
     SellbirdConfig(**out)
 

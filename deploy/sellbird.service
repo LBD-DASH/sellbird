@@ -1,0 +1,15 @@
+[Unit]
+Description=Sellbird outreach (free model router, Resend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sellbird
+EnvironmentFile=-/opt/sellbird/.env
+ExecStart=/opt/sellbird/scripts/sellbird-run.sh
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

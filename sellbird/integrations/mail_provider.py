@@ -24,7 +24,7 @@ from typing import Protocol
 
 logger = logging.getLogger("sellbird.mail")
 
-NATIVE_PROVIDERS = ("gmail", "smtp", "microsoft")
+NATIVE_PROVIDERS = ("gmail", "smtp", "microsoft", "resend")
 
 
 @dataclass
@@ -233,4 +233,7 @@ def get_mail_provider(config, env) -> MailProvider | None:
     if provider == "microsoft":
         from sellbird.integrations.microsoft import MicrosoftProvider
         return MicrosoftProvider(config, env)
+    if provider == "resend":
+        from sellbird.integrations.resend_mail import ResendProvider
+        return ResendProvider(config, env)
     return None
