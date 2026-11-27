@@ -679,6 +679,29 @@ MIGRATIONS: list[str] = [
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, approved_at TIMESTAMP, posted_at TIMESTAMP);
     CREATE INDEX IF NOT EXISTS idx_social_posts_status ON social_posts(status, created_at);
     """,
+    # ── v24: free-router call counts, the do-not-contact table, inbound mail ──
+    # dnc is the list a STOP, an unsubscribe, or a bounce writes. A row is
+    # never emailed again. inbound_mail is what the Resend webhook stores
+    # for the poll path to pick up.
+    """
+    ALTER TABLE usage_log ADD COLUMN openai_calls INTEGER DEFAULT 0;
+    CREATE TABLE IF NOT EXISTS dnc (
+      email TEXT PRIMARY KEY,
+      reason TEXT NOT NULL,
+      source TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS inbound_mail (
+      provider_id TEXT PRIMARY KEY,
+      from_email TEXT NOT NULL DEFAULT '',
+      subject TEXT DEFAULT '',
+      body TEXT DEFAULT '',
+      message_id TEXT DEFAULT '',
+      in_reply_to TEXT DEFAULT '',
+      is_bounce INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
 ]
 
 # The deal on a person (set_deal) and the agent's request log.
@@ -687,8 +710,12 @@ DEAL_TEXT_MAX = 300
 DEAL_NOTES_MAX = 4000
 AGENT_LOG_KEEP = 5000
 
-BRAIN_PROVIDERS = ("claude", "codex")
-_USAGE_LOG_COLUMN = {"claude": "claude_calls", "codex": "codex_calls"}
+BRAIN_PROVIDERS = ("claude", "codex", "openai")
+_USAGE_LOG_COLUMN = {
+    "claude": "claude_calls",
+    "codex": "codex_calls",
+    "openai": "openai_calls",
+}
 
 # When a company was last profiled: the newer of the explicit check stamp
 # (set on every attempt, reachable or not) and its latest profile observation
@@ -2389,6 +2416,71 @@ class StateManager:
         """The reason an address won't be emailed (itself or its domain), or None."""
         return (await self.suppressed_among([email])).get(_norm(email))
 
+    # ── Do-not-contact rows written by STOP, unsubscribe, and bounces ──
+
+    DNC_REASONS = ("stop", "unsubscribe", "bounce")
+
+    async def add_dnc(self, email: str, reason: str = "unsubscribe", source: str = "") -> bool:
+        """Remember an address that must never be emailed again.
+
+        Also writes the suppression list the rest of Sellbird already checks,
+        so a path that only looks there still holds the address.
+        """
+        key = _norm(email)
+        if "@" not in key:
+            raise ValueError("not an email address")
+        stored = reason if reason in self.DNC_REASONS else "unsubscribe"
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "INSERT OR IGNORE INTO dnc (email, reason, source) VALUES (?, ?, ?)",
+                (key, stored, (source or "")[:200]),
+            )
+            await db.commit()
+            added = cursor.rowcount > 0
+        suppression = "bounced" if stored == "bounce" else "opted_out"
+        try:
+            await self.add_suppression("address", key, suppression, source or "dnc")
+        except Exception:
+            pass
+        return added
+
+    async def is_dnc(self, email: str) -> str | None:
+        """The DNC reason for this address, or None."""
+        key = _norm(email)
+        if not key:
+            return None
+        async with self._connect() as db:
+            async with db.execute("SELECT reason FROM dnc WHERE email = ?", (key,)) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else None
+
+    async def add_inbound_mail(self, *, provider_id: str, from_email: str, subject: str = "",
+                               body: str = "", message_id: str = "", in_reply_to: str = "",
+                               is_bounce: bool = False) -> bool:
+        """Store one inbound message. A second copy of the same id is ignored."""
+        if not provider_id:
+            return False
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """INSERT OR IGNORE INTO inbound_mail
+                   (provider_id, from_email, subject, body, message_id, in_reply_to, is_bounce)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (provider_id[:200], _norm(from_email), subject[:500], body[:20000],
+                 message_id[:500], in_reply_to[:500], 1 if is_bounce else 0),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def list_inbound_mail(self, limit: int = 50) -> list[dict]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT provider_id, from_email, subject, body, message_id, in_reply_to, is_bounce
+                   FROM inbound_mail ORDER BY created_at DESC LIMIT ?""",
+                (int(limit),),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
     async def list_suppressions(self, limit: int = 200, offset: int = 0) -> list[dict]:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -3629,11 +3721,13 @@ class StateManager:
             ) as cursor:
                 auto_reply_handoffs = (await cursor.fetchone())[0]
             async with db.execute(
-                "SELECT claude_calls, codex_calls FROM usage_log WHERE date = ?", (today,)
+                "SELECT claude_calls, codex_calls, openai_calls FROM usage_log WHERE date = ?",
+                (today,),
             ) as cursor:
                 usage_row = await cursor.fetchone()
                 usage_today = (usage_row[0] or 0) if usage_row else 0
                 codex_today = (usage_row[1] or 0) if usage_row else 0
+                openai_today = (usage_row[2] or 0) if usage_row else 0
 
         return {
             "prospects": prospect_counts,
@@ -3651,7 +3745,9 @@ class StateManager:
             "open_conversations": open_conversations,
             "auto_reply_handoffs": auto_reply_handoffs,
             "usage_today": usage_today,  # Claude calls (kept for compatibility)
-            "usage_today_by_provider": {"claude": usage_today, "codex": codex_today},
+            "usage_today_by_provider": {
+                "claude": usage_today, "codex": codex_today, "openai": openai_today,
+            },
             # Companies discovered but not yet read. The heartbeat profiles
             # these every cycle — it is free, so it never competes with the
             # Claude budget the rest of the loop is rationing.

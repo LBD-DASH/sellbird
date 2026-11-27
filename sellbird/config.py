@@ -261,6 +261,12 @@ class EmailChannelConfig(BaseModel):
     # SMTP+IMAP mailbox: AgentMail, Fastmail, ...)
     provider: str = "instantly"
     max_daily_sends: int = 50
+    # Ceiling max_daily_sends cannot rise above. Sends stop at the lower one.
+    hard_daily_cap: int = 75
+    # "" keeps the schedule the sequence was written with.
+    # sa_one_and_day_3_7: one email to a .za address or a South African
+    # location, and day 3 plus day 7 for everyone else, then stop.
+    cadence: str = ""
     # Each extra sending inbox's daily cold-email cap (sellbird inboxes),
     # under the warmup ramp from the day that inbox started warming. The
     # main mailbox keeps max_daily_sends and warmup.start_date, and
@@ -318,6 +324,21 @@ class EmailChannelConfig(BaseModel):
     def _sends_non_negative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("max_daily_sends must be >= 0")
+        return v
+
+    @field_validator("hard_daily_cap")
+    @classmethod
+    def _hard_cap_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("hard_daily_cap must be at least 1")
+        return v
+
+    @field_validator("cadence", mode="before")
+    @classmethod
+    def _known_cadence(cls, v):
+        v = "" if v is None else str(v).strip()
+        if v and v != "sa_one_and_day_3_7":
+            raise ValueError("cadence must be empty or sa_one_and_day_3_7")
         return v
 
     @field_validator("per_inbox_daily_cap")
@@ -696,7 +717,7 @@ class UsageConfig(BaseModel):
         return v
 
 
-BRAIN_PROVIDERS = ("claude", "codex")
+BRAIN_PROVIDERS = ("claude", "codex", "openai")
 CODEX_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 # Model names are passed to a CLI, so they must look like a model name and
@@ -707,10 +728,11 @@ _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$")
 class BrainConfig(BaseModel):
     """Which subscription Sellbird thinks with.
 
-    ``claude`` (default) runs Claude Code headless on your Claude plan.
-    ``codex`` runs Codex on your ChatGPT plan. There is never an automatic
-    fallback between them, and an explicit ``model`` only affects Sellbird —
-    your own Claude Code / Codex settings are never read or changed.
+    ``claude`` (default in code) runs Claude Code headless on your Claude plan.
+    ``codex`` runs Codex on your ChatGPT plan. ``openai`` calls an
+    OpenAI-compatible router (LLM_BASE_URL, LLM_MODEL). There is never an
+    automatic fallback between them, and an explicit ``model`` only affects
+    Sellbird. Your own Claude Code / Codex settings are never read or changed.
     """
 
     provider: str = "claude"
@@ -780,6 +802,17 @@ class WriterConfig(BaseModel):
     # the length, follow-ups to someone stop the moment they reply, book a
     # meeting or opt out. 1 means a first email and no follow-ups.
     sequence_length: int = Field(default=3, ge=1)
+    # When set, a draft that names any other dollar amount waits for review.
+    allowed_prices: list[int] = []
+
+    @field_validator("allowed_prices", mode="before")
+    @classmethod
+    def _price_list(cls, v):
+        if v is None or v == "":
+            return []
+        if isinstance(v, (int, float, str)):
+            v = [v]
+        return [int(float(item)) for item in v]
 
     @field_validator("email_rules", mode="before")
     @classmethod
@@ -905,6 +938,12 @@ class WebhookConfig(BaseModel):
     events: list[str] = []
 
 
+class DiscoveryRunConfig(BaseModel):
+    """Which discovery source the heartbeat and `sellbird discover` use."""
+
+    provider: str = "osm"
+
+
 class SellbirdConfig(BaseModel):
     persona: PersonaConfig
     product: ProductConfig
@@ -912,6 +951,7 @@ class SellbirdConfig(BaseModel):
     channels: ChannelsConfig = ChannelsConfig()
     usage: UsageConfig = UsageConfig()
     brain: BrainConfig = BrainConfig()
+    discovery: DiscoveryRunConfig = DiscoveryRunConfig()
     compliance: ComplianceConfig = ComplianceConfig()
     writer: WriterConfig = WriterConfig()
     handoff: HandoffConfig = HandoffConfig()
@@ -954,6 +994,9 @@ class EnvConfig(BaseModel):
     m365_tenant_id: str = ""
     # Optional: only used when compliance.precleared.enabled is true.
     precleared_api_key: str = ""
+    # Resend (channels.email.provider: resend). The webhook secret stays in
+    # the environment only and is not copied onto this object.
+    resend_api_key: str = ""
 
 
 def _format_validation_error(e: ValidationError) -> str:
@@ -1097,6 +1140,7 @@ def load_env() -> EnvConfig:
         m365_client_id=os.getenv("M365_CLIENT_ID", "").strip(),
         m365_tenant_id=os.getenv("M365_TENANT_ID", "").strip(),
         precleared_api_key=os.getenv("PRECLEARED_API_KEY", "").strip(),
+        resend_api_key=os.getenv("RESEND_API_KEY", "").strip(),
     )
     return env
 

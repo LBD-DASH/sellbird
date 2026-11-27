@@ -186,10 +186,11 @@ async def _test_claude(brain: Brain) -> bool:
 def _ask_brain_config() -> BrainConfig:
     """Ask which subscription Sellbird thinks with. Claude is the default."""
     _print_sellbird("I think with an AI subscription you already pay for:")
-    print("    claude — your Claude plan, via Claude Code (default)")
-    print("    codex  — your ChatGPT plan, via the Codex CLI")
+    print("    claude: your Claude plan, via Claude Code")
+    print("    codex: your ChatGPT plan, via the Codex CLI")
+    print("    openai: a free OpenAI-compatible router (LLM_BASE_URL, LLM_MODEL)")
     while True:
-        provider = _ask("Which one? (claude/codex)", default="claude").lower()
+        provider = _ask("Which one? (claude/codex/openai)", default="openai").lower()
         if provider == "codex":
             from sellbird.codex import CodexError, require_supported_platform
             try:
@@ -197,9 +198,9 @@ def _ask_brain_config() -> BrainConfig:
             except CodexError as e:
                 print(f"    ({e})")
                 continue
-        if provider in ("claude", "codex"):
+        if provider in ("claude", "codex", "openai"):
             break
-        print("    (type claude or codex)")
+        print("    (type claude, codex, or openai)")
     if provider == "codex":
         from sellbird.codex import SUGGESTED_MODEL
         print(f"    {SUGGESTED_MODEL} is the Codex model Sellbird has verified as text-only")

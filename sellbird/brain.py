@@ -40,7 +40,7 @@ _NON_RETRYABLE_PATTERNS = (
 )
 
 
-PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex"}
+PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex", "openai": "Free model router"}
 
 # Settings key holding the brain's last health transition, for `sellbird
 # status` and the dashboard: {"provider", "status": "ok"|"paused", "reason",
@@ -113,6 +113,7 @@ class Brain:
         self.provider = self.config.provider
         self.model = self.config.model
         self.codex = None
+        self.llm = None
         # Whether the last think_json got no reply at all (an outage, logout,
         # rate limit or timeout), as opposed to a reply that wasn't valid
         # JSON. Callers that count model failures must not count outages.
@@ -130,6 +131,10 @@ class Brain:
                 model=self.model, reasoning_effort=self.config.reasoning_effort
             )
             self.quota = CodexQuotaClient(self.codex)
+        elif self.provider == "openai":
+            from sellbird.llm_openai import OpenAICompatClient, _NoLiveQuota
+            self.llm = OpenAICompatClient(model=self.model)
+            self.quota = _NoLiveQuota()
         else:
             # Lazy import avoids a cycle (quota -> usage -> state).
             from sellbird.integrations.quota import QuotaClient
@@ -166,6 +171,8 @@ class Brain:
         PROVIDER_RECHECK_SECONDS, so a persistent problem doesn't start
         runtimes every heartbeat.
         """
+        if self.provider == "openai":
+            return await self._openai_preflight()
         if self.provider != "codex":
             return await self._claude_preflight()
         from sellbird.codex import CodexError
@@ -207,6 +214,14 @@ class Brain:
                 await self._mark_available()
         return ""
 
+    async def _openai_preflight(self) -> str:
+        """Config only. A down router is a failed job, not a reason to switch provider."""
+        reason = self.llm.configured_reason() if self.llm is not None else "LLM client is missing"
+        if reason:
+            logger.error("Free model router is not configured: %s. No fallback.", reason)
+            return reason
+        return ""
+
     async def _claude_preflight(self) -> str:
         """Claude: the installed CLI must support every isolation flag
         (claude_runtime.check_cli). Runs ``claude --help`` only: no login
@@ -225,6 +240,9 @@ class Brain:
     def _fingerprint(self):
         if self.provider == "codex":
             return self.codex.fingerprint()
+        if self.provider == "openai":
+            client = self.llm
+            return ("openai", getattr(client, "base_url", ""), getattr(client, "model", ""))
         from sellbird.claude_runtime import fingerprint
         return fingerprint()
 
@@ -294,6 +312,11 @@ class Brain:
         if self.transport is not None:
             return await self._think_transport(prompt, expect_json=expect_json,
                                                timeout=timeout, agent=agent, task=task)
+        if self.provider == "openai":
+            return await self._think_openai(
+                prompt, timeout=timeout, max_retries=max_retries, agent=agent, task=task,
+                session_id=session_id,
+            )
         if self.provider == "codex":
             return await self._think_codex(
                 prompt, session_id=session_id, timeout=timeout,
@@ -441,6 +464,40 @@ class Brain:
             f"Last error: {str(last_error)[:200]}"
         )
         return ""
+
+    async def _think_openai(self, prompt: str, timeout: float, max_retries: int,
+                           agent: str, task: str, session_id: str | None) -> str:
+        """One router call. Failure logs the reason and returns "" . No other provider is tried."""
+        from sellbird.llm_openai import LLMError
+
+        # max_retries is the caller's budget. The client has its own 429/5xx loop.
+        del max_retries
+        try:
+            result = await self.llm.complete(prompt, timeout=timeout)
+        except LLMError as e:
+            logger.error("Free model router failed: %s. No fallback.", e)
+            return ""
+        except Exception as e:
+            logger.error("Free model router failed (%s). No fallback.", type(e).__name__)
+            return ""
+        try:
+            await self.state.increment_usage(provider="openai")
+        except Exception as e:
+            logger.warning(f"Failed to record usage counter: {e}")
+        try:
+            await self.state.record_usage_event(
+                agent=agent,
+                task=task or (session_id or ""),
+                session_id=session_id or "",
+                model=result.model,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                source="openai_compat",
+                provider="openai",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record usage event: {e}")
+        return result.text
 
     async def _think_codex(
         self,

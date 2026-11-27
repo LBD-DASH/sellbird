@@ -147,6 +147,7 @@ class Scout:
         self.env = env
         self.skills = ""
         self._queries_this_cycle = 0
+        self._query_limit = MAX_QUERIES_PER_CYCLE
         # In-memory dedup guards, reset each cycle.
         self._seen_prospect_keys: set[str] = set()
         self._seen_domains: set[str] = set()
@@ -163,6 +164,7 @@ class Scout:
 
         self.skills = self.brain.load_skills_for_agent("scout")
         self._queries_this_cycle = 0
+        self._query_limit = MAX_QUERIES_PER_CYCLE
         self._seen_prospect_keys = set()
         self._seen_domains = set()
         self._site_reads, self._site_evidence, self._own_domains = {}, {}, {}
@@ -388,13 +390,16 @@ class Scout:
 
     # ── Search backend abstraction ──
 
+    def _at_query_limit(self) -> bool:
+        return self._queries_this_cycle >= getattr(self, "_query_limit", MAX_QUERIES_PER_CYCLE)
+
     async def _web_search(self, query: str) -> list[tuple[str, str]]:
         """Search the web using the best available backend.
 
         Returns list of (url, snippet) tuples.
         Tries backends in order: Serper API → TinyFish Search API → DuckDuckGo → Bing → Google.
         """
-        if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
+        if self._at_query_limit():
             logger.info("Scout: Query limit reached for this cycle. Will continue next cycle.")
             return []
 
@@ -864,7 +869,7 @@ class Scout:
         industry = self.config.icp.industries[0] if self.config.icp.industries else ""
 
         for title in self.config.icp.titles:
-            if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
+            if self._at_query_limit():
                 break
 
             query = f'site:linkedin.com/in "{title}"'
@@ -917,6 +922,13 @@ class Scout:
         the contacts that Python already found.
         """
         logger.info("Scout: Discovering companies...")
+        from sellbird.collectors.audience import scout_queries
+        planned = scout_queries(self.config)
+        if planned:
+            # These audiences are not map categories. Give this strategy its
+            # own searches so a cycle spent elsewhere cannot zero them out.
+            self._queries_this_cycle = 0
+            self._query_limit = max(MAX_QUERIES_PER_CYCLE, len(planned))
 
         companies = []
         try:
@@ -1012,13 +1024,15 @@ class Scout:
         companies = []
 
         for query in self._build_company_search_queries():
-            if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
+            if self._at_query_limit():
                 break
 
             results = await self._web_search(query)
 
             for url, snippet in results:
                 domain = self._extract_domain(url)
+                if "-site:.za" in query and (domain.endswith(".za") or "south africa" in snippet.lower()):
+                    continue
                 if not self._is_candidate_domain(domain):
                     continue
                 if await self.state.company_exists(domain):
@@ -1061,7 +1075,7 @@ class Scout:
             ])
 
         for query in directory_queries:
-            if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
+            if self._at_query_limit():
                 break
 
             results = await self._web_search(query)
@@ -1177,6 +1191,10 @@ class Scout:
 
     def _build_company_search_queries(self) -> list[str]:
         """Build search queries to find ICP-matching companies."""
+        from sellbird.collectors.audience import scout_queries
+        audience = scout_queries(self.config)
+        if audience:
+            return audience
         queries = []
         industries = self.config.icp.industries or [""]
         geos = self.config.icp.geography or [""]

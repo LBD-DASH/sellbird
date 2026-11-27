@@ -245,6 +245,22 @@ database, the logs and the dashboard token.
 | [Microsoft 365](docs/microsoft365.md) · [Precleared](docs/precleared.md) | Provider setup guides |
 | [Docker](docs/docker.md) · [Troubleshooting](docs/troubleshooting.md) · [Roadmap](docs/roadmap.md) | Running, fixing and what's next |
 
+## This fork: 6 Human Needs
+
+This fork sends only through Resend and thinks only with the free OpenAI-compatible router. Both sending flags default to off, so a fresh box queues drafts and sends nothing until you turn them on.
+
+1. `python3 -m venv .venv && source .venv/bin/activate && pip install -e .`
+2. `cp .env.example .env` and set `LLM_API_KEY`, `LLM_MODEL`, and `RESEND_API_KEY`. Leave `SENDING_ENABLED=false` until you have read a batch of drafts. `RESEND_WEBHOOK_SECRET` is the Resend signing secret for inbound mail.
+3. The router listens at `LLM_BASE_URL` (default `http://127.0.0.1:3010/v1`). A 429 or 5xx is retried. Any other failure stops that job and is logged. There is no second provider.
+4. `sellbird signals --confirm free` so discovery has somewhere to store what it found. Paid signals stay off.
+5. `sellbird discover --provider ddg` finds practices for the four audiences (individuals and couples, team leaders, HR, and coaches outside South Africa). The free web search is Bing when DuckDuckGo blocks the request. An empty or blocked search is reported. It does not invent companies.
+6. `scripts/sellbird-service.sh start` runs the heartbeat and the inbound webhook. With systemd, copy `deploy/sellbird.service` to `/etc/systemd/system/`, point `WorkingDirectory` and `ExecStart` at this checkout, then `systemctl enable --now sellbird`. `scripts/sellbird-service.sh stop` and `status` work either way.
+7. Inbound mail is `POST /resend/inbound` on `INBOUND_BIND:INBOUND_PORT` (default `127.0.0.1:8787`). The signature is checked. Point a reverse proxy at it if Resend must reach the box from the internet. The heartbeat also polls Resend.
+8. STOP, unsubscribe, and bounce write the address to the DNC table. That address is not emailed again. A `.za` address or a South African location gets one email. Everyone else gets a follow-up on day 3 and day 7, then the sequence stops. The hard daily cap defaults to 75.
+9. Interested and question replies get a drafted answer. It is sent only when `SENDING_ENABLED` and `AUTO_REPLY_ENABLED` are both true. Otherwise it waits for review.
+
+Copy may name only a free 10-minute assessment, a $29 Personal report, a $59 Relationship report, and a $149 Personal Report plus 1 hour of coaching.
+
 ## Contributing
 
 Pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: it covers keeping real contact data out of the repo, test email, signing off your commits, and the one-time [Contributor License Agreement](CLA.md). Found a security problem? Follow [SECURITY.md](SECURITY.md) instead of opening an issue.

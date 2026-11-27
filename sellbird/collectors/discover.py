@@ -1460,9 +1460,12 @@ class ScavioSearch(ScavioProvider):
         return out
 
 
+from sellbird.collectors.web_search import WebSearch
+
 PROVIDERS: dict[str, DiscoveryProvider] = {
     p.key: p for p in (
         OpenStreetMap(),
+        WebSearch(),
         TinyFish(),
         DataForSEOListings(),
         DataForSEOSerp(),
@@ -1783,6 +1786,10 @@ async def run_discovery(
                     break
                 if i and provider.key == "osm":
                     await asyncio.sleep(OpenStreetMap.MIN_INTERVAL)
+                elif i and provider.key == "ddg":
+                    # Free search engines throttle a burst. A short gap keeps
+                    # the run from looking like a bot and coming back empty.
+                    await asyncio.sleep(1.5)
 
                 try:
                     report.queries_ran += 1

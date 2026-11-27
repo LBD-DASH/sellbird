@@ -3721,6 +3721,14 @@ _discovery_report: dict | None = None
 _discovery_kind = "discover"   # or "profile": reading sites has no stop switch
 
 
+def _configured_discovery_provider() -> str:
+    try:
+        from sellbird.config import load_config
+        return str(getattr(load_config().discovery, "provider", "") or "")
+    except Exception:
+        return ""
+
+
 def _discovery_queries(body: dict, config):
     from sellbird.collectors.discover import build_queries, preset_problem
 
@@ -3749,7 +3757,8 @@ async def get_discovery_providers():
         return {
             "providers": provider_menu(load_env().model_dump()),
             "default": DEFAULT_PROVIDER,
-            "selected": await state.get_setting("discovery_provider") or DEFAULT_PROVIDER,
+            "selected": await state.get_setting("discovery_provider") or _configured_discovery_provider()
+            or DEFAULT_PROVIDER,
             "paused": await state.get_setting("discovery_paused"),
             "running": bool(_discovery_task and not _discovery_task.done()),
             "running_kind": _discovery_kind,
